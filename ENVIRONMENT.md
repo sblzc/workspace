@@ -573,6 +573,136 @@ headers  Additional headers attached to MCP requests.
 
 ---
 
+## 11. 推送通道实测（决定性：什么能用、什么不能用）
+
+### 11.1 权限不是问题 —— 别再怀疑权限
+
+细粒度令牌对 `sblzc/workspace` 的实测权限：
+
+```json
+"permissions": {"admin":true,"maintain":true,"push":true,"triage":true,"pull":true}
+```
+
+`GET /api.github.com/user` → **200，`login: sblzc`, `id: 175811836`**。
+细粒度令牌只要把仓库勾进 **Selected repositories** 就有 `push`，
+**不需要 `administration`**（那只用于建仓库这种账号级动作）。
+
+判断权限的正确方式是查 `GET /api.github.com/repos/<owner>/<repo>` 的 `permissions` 字段。
+**不要用 push 的报错推断权限** —— 本机 push 报的 `could not read Username` 是认证头
+根本没送出去，和权限毫无关系（见 11.3）。
+
+### 11.2 网络：`github.com` 间歇阻断，`api.github.com` 完全正常
+
+8 轮交替探测：
+
+| 主机 | ok / fail | 备注 |
+|---|---|---|
+| `github.com` | **3 / 5** | 成功时仅 264ms；失败时卡满 ~10.7–10.8 秒 |
+| `codeload.github.com` | 8 / 0 | 100% 可靠，平均 559ms |
+| `api.github.com` | 8 / 0 | 平均 ~450–543ms |
+
+失败率约 **62%**。失败形态：Node `TypeError`、git
+`Failed to connect to github.com:443 after 21087 ms`、部分 `Recv failure: Connection was reset`。
+DNS：`github.com -> 20.205.243.166`、`api.github.com -> 20.205.243.168`。
+
+**推论**：只走 `api.github.com` 的操作（REST、官方远程 MCP）不受影响；
+走 `github.com` 的 git push/clone **需要重试**。
+
+### 11.3 `http.extraHeader` 传令牌在本机不生效
+
+```
+git -c "http.extraHeader=Authorization: Bearer <PAT>" push ...
+→ 前 2 次:  Failed to connect to github.com:443 after 21087 ms
+→ 第 3 次起: fatal: could not read Username for 'https://github.com'
+             : terminal prompts disabled
+```
+
+**这条报错极具误导性** —— 看着像权限不足，实际是认证头从未送达，
+git 收不到凭据就退回去找 username。**排查时不要被它带偏。**
+
+### 11.4 唯一可靠的认证方式：令牌嵌进 URL + `insteadOf`
+
+```powershell
+$url = "https://x-access-token:$tok@github.com/sblzc/workspace.git"
+git -c http.sslBackend=openssl -c credential.helper= push $url main
+```
+
+两个要点：
+
+- 令牌**必须嵌进 URL**；`credential.helper=` 显式置空，否则 git 会去 spawn
+  那个在本沙箱必然失败的凭据帮助器（`couldn't create signal pipe, Win32 error 5`）。
+- 成功判据：远端 `refs/heads/main` 与本地 `main` 的 SHA 一致。
+
+### 11.5 自动化配置（`tools/setup-git-auth.ps1`）
+
+为了让普通的 `git fetch` / `git push` 也能自动认证，令牌放在
+**`.git/radio-credentials`**（`.git/config` 本体保持干净），用 `include.path` 引入：
+
+```ini
+# .git/radio-credentials
+[url "https://x-access-token:<PAT>@github.com/sblzc/workspace.git"]
+	insteadOf = https://github.com/sblzc/workspace.git
+```
+
+重建命令：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\radio\tools\setup-git-auth.ps1
+```
+
+脚本做四件事：写凭据文件 → `include.path` 引入（幂等）→
+`http.sslBackend=openssl` → 修复 `branch.main.remote` 回 `origin`。
+
+**实测结果**：
+
+```
+git fetch origin  → exit 0,  * [new branch] main -> origin/main
+git push  origin  → exit 0,  c2ff721..54415e6  main -> main
+```
+
+### 11.6 三个必须记住的坑
+
+**① `git push -u <带令牌的URL>` 会把令牌写进 `.git/config`**
+
+`-u` 把该 URL 记成 `branch.main.remote`：
+
+```ini
+[branch "main"]
+	remote = https://x-access-token:github_pat_...@github.com/sblzc/workspace.git
+```
+
+修复：`git config --local branch.main.remote origin`。
+**以后一律把 `origin` 指向不含令牌的裸 URL，令牌只经 `insteadOf` 注入。**
+
+**② 键名是 `http.sslBackend`，不是 `core.sslbackend`**
+
+写成 `core.sslbackend` 完全不生效，普通 `git fetch` 会回落到系统级 schannel：
+
+```
+fatal: unable to access '...': schannel: AcquireCredentialsHandle failed:
+       SEC_E_NO_CREDENTIALS (0x8009030e)
+```
+
+**③ 每次 git 网络操作都会打一行 `sh.exe` 报错，但操作仍然成功**
+
+```
+0 [main] sh (28104) C:\Program Files\Git\usr\bin\sh.exe:
+  *** fatal error - couldn't create signal pipe, Win32 error 5
+To https://github.com/sblzc/workspace.git
+   c2ff721..54415e6  main -> main        ← 注意：push 是成功的
+```
+
+这是 git 内部的 `sh.exe` 残留调用，**退出码 0、结果正确**。
+看到这行不要以为失败了 —— **以退出码和远端 SHA 为准**。
+
+> 脚本文件 `tools/setup-git-auth.ps1` **必须纯 ASCII**。
+> Windows PowerShell 5.1 会把无 BOM UTF-8 的 `.ps1` 按 GBK 读入，
+> 含中文时解析器直接崩溃（`Unexpected token '浠ょ墝...'`）。
+> 本机**没有 `pwsh`**，只有 PowerShell 5.1，调用要用
+> `powershell -NoProfile -ExecutionPolicy Bypass -File <path>`。
+
+---
+
 ## 8. 附：本次探测留下的文件
 
 - `_env_probe.ps1` — 工具存在性、身份、npm/node、GitHub 可达性、git 配置、写权限

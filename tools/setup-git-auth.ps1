@@ -1,61 +1,78 @@
-# 让这台机器上的 git 自动带上 GitHub 令牌
+# Make git on this machine authenticate to GitHub automatically.
 #
-# 为什么需要这个：
-#   本机不能 spawn 带管道的子进程，所以凭据帮助器（GCM / credential.helper=store）
-#   全部不可用 —— 它们都要 spawn 子进程，报 "couldn't create signal pipe, Win32 error 5"。
-#   同时 http.extraHeader 送 Authorization 头在本机也不生效（Git for Windows 下
-#   会被当成「没有凭据」而转去询问用户名）。
+# WHY THIS EXISTS
+#   This sandbox cannot spawn a subprocess with pipes, so every credential
+#   helper (GCM, credential.helper=store) is unusable -- they all shell out
+#   and die with "couldn't create signal pipe, Win32 error 5".
+#   http.extraHeader also fails to carry the token here (Git for Windows
+#   treats it as "no credentials" and asks for a username instead).
 #
-# 解决办法：
-#   把令牌嵌进 URL。用 url.<带令牌的 URL>.insteadOf 做改写，
-#   这样 `git push` / `git fetch` 照常敲，令牌自动补上。
+# THE FIX
+#   Put the token in the URL, and use url.<tokenized>.insteadOf so that a
+#   plain `git push` / `git fetch` gets the token injected automatically.
 #
-# 令牌为什么不在 .git/config 里：
-#   写在 .git/radio-credentials 里，再由 .git/config 的 include 引进来。
-#   .git/config 保持干净，令牌单独一个文件，方便单独换、单独删。
+# WHY THE TOKEN IS NOT IN .git/config
+#   It lives in .git/radio-credentials, pulled in via include.path.
+#   .git/config stays clean; the secret is one file you can rotate or delete.
 #
-# 换令牌时只需要跑这一个脚本。
+# Re-run this script after changing the token.
+# NOTE: this file is deliberately ASCII-only. Windows PowerShell 5.1 reads
+#       BOM-less UTF-8 .ps1 files as ANSI/GBK and mangles non-ASCII text.
 
 $ErrorActionPreference = 'Stop'
-$repoRoot   = 'D:\radio'
-$tokenFile  = Join-Path $repoRoot '.github-token'
-$credFile   = Join-Path $repoRoot '.git\radio-credentials'
-$ownerRepo  = 'sblzc/workspace'
+$repoRoot  = 'D:\radio'
+$tokenFile = Join-Path $repoRoot '.github-token'
+$credFile  = Join-Path $repoRoot '.git\radio-credentials'
+$ownerRepo = 'sblzc/workspace'
 
 if (-not (Test-Path $tokenFile)) {
-    throw "找不到 $tokenFile —— 先把令牌写进去（一行，无引号，无 Bearer 前缀）"
+    throw "Missing $tokenFile -- write the token there first (one line, no quotes, no 'Bearer ' prefix)."
 }
 $tok = (Get-Content $tokenFile -Raw).Trim()
 if ($tok -notmatch '^(github_pat_|ghp_)') {
-    throw "令牌看起来不像 GitHub 令牌（应以 github_pat_ 或 ghp_ 开头）"
+    throw "That does not look like a GitHub token (expected a github_pat_ or ghp_ prefix)."
 }
 
 $withToken = "https://x-access-token:$tok@github.com/$ownerRepo.git"
 $plain     = "https://github.com/$ownerRepo.git"
 
-$content = @"
-# 自动生成，请勿手工编辑。重新生成：pwsh -File D:\radio\tools\setup-git-auth.ps1
-[url "$withToken"]
-	insteadOf = $plain
-"@
+# 1. Write the credential file (tokenized insteadOf rule).
+$content = "# Generated file. Do not edit by hand.`n" +
+           "# Regenerate: powershell -NoProfile -ExecutionPolicy Bypass -File D:\radio\tools\setup-git-auth.ps1`n" +
+           "[url `"$withToken`"]`n" +
+           "`tinsteadOf = $plain`n"
 [System.IO.File]::WriteAllText($credFile, $content, (New-Object System.Text.UTF8Encoding($false)))
 
-# 把这份凭据引进来（幂等：先删同名 include 再加）
 Set-Location $repoRoot
+
+# 2. Include it from .git/config (idempotent).
 $existing = git config --local --get-all 'include.path' 2>$null
 if ($existing) {
     $existing | Where-Object { $_ -like '*radio-credentials*' } | ForEach-Object {
         git config --local --unset 'include.path' $_ 2>$null
     }
 }
-git config --local --add 'include.path' "$credFile"
+git config --local --add 'include.path' $credFile
 
-Write-Output "  已写入   $credFile   ($($content.Length) 字节)"
-Write-Output "  已引入   .git/config 的 include.path"
+# 3. Pin the TLS backend. The system-level http.sslBackend=schannel does not
+#    work here ("schannel: AcquireCredentialsHandle failed"). Use openssl.
+#    The key is http.sslBackend -- NOT core.sslbackend.
+git config --local 'http.sslBackend' 'openssl'
+
+# 4. Repair branch tracking. An earlier `git push -u <url-with-token> main`
+#    recorded the tokenized URL as the branch's tracking remote, which leaked
+#    the token into .git/config. Point it back at the plain remote name.
+git config --local 'branch.main.remote' 'origin'
+git config --local 'branch.main.merge'  'refs/heads/main'
+
+Write-Output "  wrote     $credFile"
+Write-Output "  included  .git/config include.path"
+Write-Output "  set       http.sslBackend = openssl"
+Write-Output "  repaired  branch.main.remote = origin"
 Write-Output ""
-Write-Output "  验证:"
+Write-Output "  verification (token redacted):"
 git config --local --get-regexp 'url\..*insteadof' | ForEach-Object {
-    # 不打印令牌
     '    ' + ($_ -replace 'x-access-token:[^@]+@', 'x-access-token:***@')
 }
-Write-Output "    include.path = $(git config --local --get include.path)"
+Write-Output "    include.path    = $(git config --local --get include.path)"
+Write-Output "    http.sslBackend = $(git config --local --get http.sslBackend)"
