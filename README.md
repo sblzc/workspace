@@ -62,7 +62,7 @@ git config user.email "你的邮箱"
 - **探测脚本保留在仓库里**，让结论可复现。
 - **令牌、密码、私钥永不入库** —— 见 `.gitignore` 和 `docs/github-pat.md`。
 
-## 三条已经踩明白的坑
+## 已经踩明白的坑
 
 写在这里，是因为它们都会以「看起来像别的问题」的样子出现。
 
@@ -78,8 +78,33 @@ git 一旦需要凭据就会报 `couldn't create signal pipe, Win32 error 5`，
 加 `-c http.sslBackend=openssl` 就正常。
 
 **三、GitHub 对本机不是稳定可达。**
-1200ms 成功和 21 秒超时都出现过，同一天内。所有联网操作都要带超时和重试，
-「一次成功」不构成结论。
+同一天内，`api.github.com` 可以 6/6 全绿（中位 100ms），而 `github.com`
+可以 **0/6 全超时**（每轮卡满 20s）。失败形态还互相伪装 —— 见下面这张表。
+
+| 报错 | 真正的原因 |
+|---|---|
+| `Recv failure: Connection was reset` | 链路抖动 |
+| `Failed to connect ... after 21087 ms` | TCP 超时 |
+| `OpenSSL SSL_read: unexpected eof ... errno 10004` | 隧道中途断开 |
+| `could not read Username ... terminal prompts disabled` | **不是**缺凭据，是请求没发出去 |
+| `403 Permission ... denied` | **不一定**是权限问题 |
+
+**所以：本机的网络错误几乎都会伪装成别的问题。**
+在得出「权限不足」「配置错了」这类结论前，先重试 3–5 次，
+再用一个绕开该层的独立探针交叉验证。
+
+**本机有一个可用代理 `127.0.0.1:7897`**（实测能 `CONNECT` 到 github.com，
+TLSv1.3，1MB POST 也扛得住）。直连失败时可以：
+
+```powershell
+git -c http.proxy=http://127.0.0.1:7897 push origin main
+```
+
+**四、`permissions.push` 这个 API 字段会骗人。**
+对一个**只读**令牌，`GET /repos/{owner}/{repo}` 仍然返回
+`"push": true`，但每个写操作都是 403。
+它描述的是**你账号在该仓库的角色**，不是**令牌被授予的 scope**。
+唯一可靠的判据是真的做一次写 —— 用 `tools/check-token-write.mjs`。
 
 ## 本机约定
 

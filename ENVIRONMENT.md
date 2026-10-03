@@ -125,6 +125,10 @@ OK   301 525ms https://raw.githubusercontent.com
 
 四项全部可达，延迟 0.5–0.7s。**说明 GitHub 没有被墙，不需要代理或 VPN。**
 
+> ⚠️ **这一节的结论是一次采样的结果，已被第 12 节修正。**
+> 同一天重复采样时 `github.com` 出现过 0/6 全超时、也出现过约 62% 失败。
+> `api.github.com` 才是稳定链路。请以第 12 节为准。
+
 `api.github.com/zen` 返回 `200` 且带真实内容，证明 HTTPS 握手与 HTTP 层都正常。
 
 ---
@@ -700,6 +704,132 @@ To https://github.com/sblzc/workspace.git
 > 含中文时解析器直接崩溃（`Unexpected token '浠ょ墝...'`）。
 > 本机**没有 `pwsh`**，只有 PowerShell 5.1，调用要用
 > `powershell -NoProfile -ExecutionPolicy Bypass -File <path>`。
+
+---
+
+## 12. 网络是间歇性的，以及本机有一个可用代理（第四轮，修正第 1 节）
+
+### 12.1 第 1 节的结论需要修正
+
+第 1 节写「四项全部可达……**不需要代理或 VPN**」。那是**一次采样**的结论，
+不成立。同一天重复采样得到的差异极大：
+
+```
+api.github.com        6/6 成功，中位 100ms          ← 一直稳
+codeload.github.com   8/8 成功，平均 559ms          ← 一直稳
+github.com            0/6 成功（全部 20s 超时）      ← 这一轮完全不通
+github.com            3/8 成功（更早一轮）           ← 约 62% 失败
+```
+
+失败形态多样，且互相伪装：
+
+| 报错 | 实际含义 |
+|---|---|
+| `Recv failure: Connection was reset` | 连接被重置 |
+| `Failed to connect to github.com:443 after 21087 ms` | TCP 层超时 |
+| `OpenSSL SSL_read: unexpected eof while reading, errno 10004` | 隧道中途断开 |
+| `fatal: could not read Username ... terminal prompts disabled` | **伪装成认证错误**，实际是请求没发出去（见 11.3） |
+| `403 Permission to ... denied` | **伪装成权限错误**，实际可能只是抖动 |
+
+**结论：`github.com` 是弱链路，`api.github.com` 是强链路。**
+所有联网操作必须带超时和重试；「一次成功」或「一次失败」都不构成结论。
+
+### 12.2 本机有代理：`127.0.0.1:7897`（开放）
+
+实测：
+
+```
+127.0.0.1:7897   OPEN   (connected, 2ms)     ← 有东西在听
+127.0.0.1:7890   closed (ECONNREFUSED)
+127.0.0.1:1080   closed
+127.0.0.1:10809  closed
+127.0.0.1:10808  closed
+```
+
+**它能隧穿到 `github.com`**，且能扛住大 POST（即 `git push` 的数据量）：
+
+```
+CONNECT github.com:443  → ok (7ms)
+TLS                     → ok, TLSv1.3
+GET /sblzc/workspace.git/info/refs?service=git-upload-pack
+                        → HTTP/1.1 200 OK
+
+POST 体积测试（经代理）：
+  1KB    → HTTP/1.1 200 OK   2138ms
+  64KB   → HTTP/1.1 200 OK   1924ms
+  256KB  → HTTP/1.1 200 OK   5734ms
+  1024KB → HTTP/1.1 200 OK  12692ms      ← push 的量级也没问题
+```
+
+用法：
+
+```powershell
+git -c http.proxy=http://127.0.0.1:7897 push origin main
+# 或写进配置：
+git config --local http.proxy http://127.0.0.1:7897
+```
+
+> 但**不要默认启用** —— 直连在链路正常时是通的，走代理会额外引入一跳。
+> 先直连，失败再加 `-c http.proxy=...`。
+
+### 12.3 一个反直觉的实测结果
+
+**`ls-remote` 通过而 `push` 失败，不是权限问题，也不是代理不支持大请求。**
+
+曾经出现这个组合：
+
+```
+git -c http.proxy=... ls-remote origin   → exit 0（成功）
+git -c http.proxy=... push origin main   → SSL_read: unexpected eof（失败）
+```
+
+当时看起来像是「代理只能读不能写」。**这个推断是错的** ——
+上面 12.2 的 1MB POST 测试证明代理完全能承载 push 体量。
+真相是**间歇性抖动**：紧接着重试，直连 `push` 一次就成功了
+（`exit=0`，远端从 `3864f8b` 前进到 `58dcb0c`）。
+
+**教训：本机的网络错误几乎都会伪装成别的问题。**
+在得出「权限不足」「代理不支持」「配置错了」这类结论前，
+先重试至少 3–5 次，并用一个绕开该层的独立探针交叉验证。
+
+### 12.4 令牌权限：`permissions.push` 字段不可信（重要）
+
+`GET /repos/sblzc/workspace` 返回
+
+```json
+"permissions": {"admin":true,"maintain":true,"push":true,"triage":true,"pull":true}
+```
+
+**但对一个只读令牌，它同样返回 `push: true`**，而那个令牌的每个写操作都是
+`403 Resource not accessible by personal access token`。
+
+该字段描述的是**账号在该仓库里的角色**，不是**令牌被授予的 scope**。
+唯一可靠的判据是**真的做一次写操作** —— 用 `tools/check-token-write.mjs`
+（建一个临时分支再删掉）。**绝不能用 `permissions.push` 判断令牌权限。**
+
+### 12.5 `tools/setup-git-auth.ps1` 曾有一个会永久挂死的 bug
+
+早先为了「幂等」写成：
+
+```powershell
+while ($true) {
+    if (no more matches) { break }
+    git config --local --unset 'include.path' $credFile
+}
+```
+
+**`--unset` 对含反斜杠的值返回 exit 5 且什么都不删**（config 里反斜杠是转义的，
+字面匹配对不上），于是循环永不退出，脚本挂死。
+
+正确写法：
+
+```powershell
+git config --local --unset-all --fixed-value 'include.path' $credFile
+git config --local --add 'include.path' $credFile
+```
+
+`--fixed-value` 做精确字符串匹配，能正确删干净。已验证连跑 3 次
+`include.path` 恒为 1 条。
 
 ---
 
