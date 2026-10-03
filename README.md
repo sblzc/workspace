@@ -35,3 +35,15 @@ git 一旦需要凭据就会报 `couldn't create signal pipe, Win32 error 5`，
 - 提交身份、凭据、令牌都走 **仓库内配置**，不写全局配置。
 - 访问令牌放在 `.github-token`（已被 `.gitignore` 排除），不进对话记录，不进提交。
 - 联网命令必须带超时与重试。
+
+## 为什么不能用凭据帮助器
+
+本机试过的替代方案都走不通，记在这里省得再试：凭据帮助器（Git Credential Manager）、
+`credential.helper = store`、SSH 密钥 —— 三个失败原因**完全相同**，
+都是沙箱拒绝创建信号管道（`couldn't create signal pipe, Win32 error 5`），
+因为它们都要 spawn 子进程。只剩令牌这一条路。
+
+## 许可
+
+[MIT](LICENSE)
+
