@@ -46,18 +46,22 @@ $content = "# Generated file. Do not edit by hand.`n" +
 Set-Location $repoRoot
 
 # 2. Include it from .git/config (idempotent).
-$existing = git config --local --get-all 'include.path' 2>$null
-if ($existing) {
-    $existing | Where-Object { $_ -like '*radio-credentials*' } | ForEach-Object {
-        git config --local --unset 'include.path' $_ 2>$null
-    }
-}
+#    Careful: plain `--unset include.path <value>` returns exit 5 and removes
+#    NOTHING when <value> contains backslashes, because config stores them
+#    escaped. That is how this file once ended up with two identical
+#    include.path lines (git then loaded the insteadOf rule twice), and how a
+#    "keep unsetting until it is gone" loop turned into a hang. Use
+#    --fixed-value, which does exact string matching and does report success.
+git config --local --unset-all --fixed-value 'include.path' $credFile 2>$null
 git config --local --add 'include.path' $credFile
 
 # 3. Pin the TLS backend. The system-level http.sslBackend=schannel does not
 #    work here ("schannel: AcquireCredentialsHandle failed"). Use openssl.
-#    The key is http.sslBackend -- NOT core.sslbackend.
+#    The key is http.sslBackend -- NOT core.sslbackend. Setting the wrong key
+#    silently does nothing, so also clear any stale core.sslBackend left over
+#    from that earlier mistake.
 git config --local 'http.sslBackend' 'openssl'
+git config --local --unset-all 'core.sslBackend' 2>$null
 
 # 4. Repair branch tracking. An earlier `git push -u <url-with-token> main`
 #    recorded the tokenized URL as the branch's tracking remote, which leaked

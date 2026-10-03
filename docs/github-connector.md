@@ -43,7 +43,16 @@
 工具对模型暴露为 `mcp__github__<toolName>`（见该 profile 文件中
 `dsh-mcp-client` 的命名规则：一个插件实例 == 一个 MCP server）。
 
-**`patchReload: live`，改完即生效，不需要重启。** 本次挂载就是热加载生效的。
+**`patchReload: live`** —— 首次挂载就是热加载生效的，不需要重启。
+
+> ⚠️ **但「热加载」不等于「令牌会换」。** `!!js` 表达式在 entry
+> **首次加载时求值一次**，结果作为普通字符串交给
+> `StreamableHTTPClientTransport`（`dsh-mcp-client/lib/index.js:48`：
+> `new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: config.headers } })`）。
+> 换掉 `.github-token` 的内容**不会**影响已经建立的连接器 ——
+> 它手里还是旧令牌，每个调用都会报
+> `unauthorized: AuthenticateToken authentication failed`。
+> 详见第 5 节的轮换流程。
 
 ---
 
@@ -90,6 +99,7 @@ node D:\radio\_mcp_probe.mjs     # 直连端点跑完整握手，列出全部工
 | 现象 | 查什么 |
 |---|---|
 | 会话里完全没有 `mcp__github__*` | `cordis.patch.yml` 是否被热加载；`failOnStartupError: true` 应让启动失败变响亮 |
+| **换了令牌后报 `unauthorized: AuthenticateToken authentication failed`** | **连接器仍持有旧令牌** —— 见第 5 节，重启 dsh 最可靠。（不是权限问题：先用 `_tokdiag.mjs` 确认 `permissions.push` 为 true） |
 | 有工具但调用报 401 | `.github-token` 内容是否含多余空白/换行；令牌是否被吊销或过期 |
 | 配置解析失败 | `!!js` 后面**必须**跟合法 YAML 标量 —— 裸反引号会报 `bad indentation of a mapping entry` |
 | `authorization value undefined` | 表达式返回了 `undefined`，检查 `readFileSync` 路径 |
@@ -98,12 +108,35 @@ node D:\radio\_mcp_probe.mjs     # 直连端点跑完整握手，列出全部工
 
 ## 5. 维护
 
-**轮换令牌**（改完即生效，无需重启）：
+**轮换令牌**（**只改 `.github-token` 是不够的**，见下）：
 
 ```powershell
-# 写新的令牌（一行，不要引号，不要 'Bearer ' 前缀）
+# 1) 写新的令牌（一行，不要引号，不要 'Bearer ' 前缀）
 Set-Content -Path D:\radio\.github-token -Value '<NEW_TOKEN>' -NoNewline -Encoding ascii
+
+# 2) git 侧：重跑脚本，把新令牌写进 .git/radio-credentials
+powershell -NoProfile -ExecutionPolicy Bypass -File D:\radio\tools\setup-git-auth.ps1
+
+# 3) 连接器侧：让 !!js 重新求值 —— 见下方说明
 ```
+
+**第 3 步为什么不能只 touch 文件**：`cordis-plugin-include/lib/index.js:177`
+的 `read()` 第一行就是
+
+```js
+if (!forced && this.content === content) return;
+```
+
+**内容不变就直接返回**，所以改时间戳（`(Get-Item $f).LastWriteTime = ...`）
+不会触发任何重载。必须**改变文件内容** —— 加一行注释即可。
+
+⚠️ **实测：即使改了内容触发热加载，连接器仍可能继续用旧令牌。**
+`interpolate` 本身不缓存（`cordis-plugin-loader/lib/index.js:295-300`），
+但重载走的 `update` 路径不一定重跑 `internal/config` 求值
+（`cordis-plugin-loader/lib/index.js:685-690`，其中一行 guard 是
+`if (this.parent.fiber?.entry === this.entry) return config;`）。
+**最可靠的做法是重启 dsh。** 确认方法：调用 `mcp__github__get_me`，
+成功返回 `{"login":"sblzc"}` 就说明新令牌生效了。
 
 **临时停用**：在 `mcp-github` 那一行加 `disabled: true`，或注释掉整个 `- insert:` 块。
 
