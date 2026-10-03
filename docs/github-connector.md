@@ -94,12 +94,54 @@ node D:\radio\_mcp_probe.mjs     # 直连端点跑完整握手，列出全部工
 `_mcp_probe.mjs` 不依赖 DSH，直接对端点做 `initialize` → `initialized` →
 `tools/list`，是最干净的「连接器到底通不通」判据。
 
+### 2026-10-03 重启后的完整验证记录（全绿）
+
+一次性把所有层都验了一遍：
+
+| 检查项 | 方法 | 结果 |
+|---|---|---|
+| 连接器认证 | `mcp__github__get_me` | `{"login":"sblzc","id":175811836}` |
+| 连接器读文件 | `get_file_contents` AGENTS.md | SHA `fa68bba8…` |
+| 连接器读提交 | `list_commits` | `757c74e`、`58dcb0c`、`ef190a8` |
+| 连接器读分支 | `list_branches` | `main` @ `757c74e`，`protected: false` |
+| 连接器读仓库 | `search_repositories` | `sblzc/workspace` |
+| 端点工具数 | 直连 `tools/list` | **46 个** |
+| 令牌写权限 | `tools/check-token-write.mjs` | **PASS**（建分支→删分支，204） |
+| git 直连 | `git ls-remote` ×3 | 3/3 `exit=0` |
+| 本地 = 远端 | `git rev-parse` 对比 | `757c74e` == `757c74e`，clean |
+
+**结论：重启 dsh 确实让连接器换上了新令牌。**
+之前那个 `unauthorized: AuthenticateToken authentication failed` 消失了 ——
+这实测确认了第 5 节「必须重启」的说法。
+
+### 两个已知的工具限制（不是故障，别浪费时间去修）
+
+**① `run_secret_scanning` 对本仓库永远不可用**
+
+```
+Error: Repository does not have GitHub Advanced Security enabled.
+```
+
+GitHub Advanced Security 是**付费功能**，公开仓库的免费额度也不包含它。
+要找密钥请改用 `search_code` 配正则，或本地扫（本仓库用的是本地扫）。
+
+**② `search_code` 加 `repo:` 限定符会因索引未覆盖而返回 0**
+
+```
+search_code("signal pipe")                        → 20,480,000 条（搜的是全 GitHub）
+search_code("repo:sblzc/workspace \"signal pipe\"") → 0 条，incomplete_results: true
+```
+
+`incomplete_results: true` 表示**索引尚未覆盖该仓库** ——
+**搜不到不等于文件里没有**。要确认仓库内容请用 `get_file_contents` 直接读。
+（`get_file_contents`、`list_commits`、`list_branches` 都正常。）
+
 ### 排查顺序
 
 | 现象 | 查什么 |
 |---|---|
 | 会话里完全没有 `mcp__github__*` | `cordis.patch.yml` 是否被热加载；`failOnStartupError: true` 应让启动失败变响亮 |
-| **换了令牌后报 `unauthorized: AuthenticateToken authentication failed`** | **连接器仍持有旧令牌** —— 见第 5 节，重启 dsh 最可靠。（不是权限问题：先用 `_tokdiag.mjs` 确认 `permissions.push` 为 true） |
+| **换了令牌后报 `unauthorized: AuthenticateToken authentication failed`** | **连接器仍持有旧令牌** —— 见第 5 节，重启 dsh 最可靠。（不要用 `permissions.push` 判断权限，那个字段会骗人；用 `tools/check-token-write.mjs`） |
 | 有工具但调用报 401 | `.github-token` 内容是否含多余空白/换行；令牌是否被吊销或过期 |
 | 配置解析失败 | `!!js` 后面**必须**跟合法 YAML 标量 —— 裸反引号会报 `bad indentation of a mapping entry` |
 | `authorization value undefined` | 表达式返回了 `undefined`，检查 `readFileSync` 路径 |
