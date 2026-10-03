@@ -377,6 +377,66 @@ PyPI OK   pipx           version=1.17.10
 
 这一轮回答的是：**「GitHub 连接器」到底哪条路走得通。**
 
+---
+
+## 11. 推送通道实测（第三轮，决定性）
+
+### 结论：`github.com` 被间歇阻断，`api.github.com` 完全正常
+
+同一时刻交替探测 8 轮：
+
+```
+github.com            ok=3 fail=5    ← 成功时仅 264ms，失败时卡满 ~10.7 秒
+codeload.github.com   ok=8 fail=0    ← 100% 可靠，平均 559ms
+api.github.com        ok=8 fail=0    ← 平均约 500ms
+```
+
+失败率约 **62%**。失败形态统一是 10-11 秒后 `TypeError`（Node）/ `Failed to connect
+to github.com:443 after 21087 ms`（git）。**重试是有效的**，因为成功态只要 264ms。
+
+### 关键陷阱：`http.extraHeader` 传令牌不生效
+
+```
+git -c "http.extraHeader=Authorization: Bearer <PAT>" push ...
+→ 前 2 次:  Failed to connect to github.com:443 after 21087 ms
+→ 第 3 次起: fatal: could not read Username for 'https://github.com'
+             : terminal prompts disabled
+```
+
+**这条错误看起来像权限问题，实际是认证头根本没送出去。** 不要被它误导 ——
+判断权限要对 `GET /api.github.com/repos/...` 看 `permissions` 字段。
+
+### 可用写法：令牌嵌进 URL
+
+```powershell
+$url = "https://x-access-token:$tok@github.com/OWNER/REPO.git"
+git -c http.sslBackend=openssl -c credential.helper= push -u $url main
+→ ls-remote  attempt 1: OK
+→ push       attempt 1: PUSH OK
+```
+
+**一次成功**，不需要重试。注意 `credential.helper=` 要显式置空，否则会去 spawn
+那个必然失败的帮助器（见第 8 节）。
+
+### 权限诊断的正确方法
+
+```json
+GET /repos/sblzc/workspace  →  200
+  "permissions": {"admin":true,"maintain":true,"push":true,"triage":true,"pull":true}
+```
+
+细粒度令牌只要把该仓库勾进 **Selected repositories**，`push` 权限就是现成的。
+不需要 `administration`（那只用于**建**仓库）。
+
+### 建仓库必须走网页或账号级权限
+
+`POST /user/repos` 用细粒度令牌返回 `403 Resource not accessible by personal access
+token`。而且有个**先有鸡还是先有蛋**的问题：令牌的 Selected repositories 列表
+只列出**已存在**的仓库，所以必须先建仓库，才能把仓库授权给令牌。
+→ 建仓库请走网页，或用带账号级 `administration` 权限的令牌。
+
+---
+
 ## 8. 决定性坏消息：沙箱内无法 spawn 带管道的子进程
 
 ```
