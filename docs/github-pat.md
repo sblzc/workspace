@@ -83,10 +83,10 @@
 
 ## 放哪里
 
-存到工作区里的一个文件：
+存到 `~/.dsh/` 下（**不要放在任何 git 仓库里**）：
 
 ```
-D:\radio\.github-token
+C:\Users\AlanL\.dsh\.github-token
 ```
 
 内容就一行，就是令牌本身，前后不要加引号、不要加 `Bearer `：
@@ -95,7 +95,23 @@ D:\radio\.github-token
 github_pat_xxxxxxxxxxxxxxxxxxxx
 ```
 
-`.gitignore` 里已经有 `.github-token` 这一条，所以它**不会被提交**。
+### 为什么放在 `~/.dsh/` 而不是工作区里
+
+两个理由，都很实在：
+
+**① 连接器是 profile 级的，服务所有工作区。**
+GitHub 连接器挂在 `~/.dsh/profiles/web/cordis.patch.yml` 上，
+所以 `D:\radio`、`D:\game`、任何目录里都能用。但如果令牌文件放在
+`D:\radio` 里，连接器的表达式就写死了那个路径 ——
+**目录一改名或移动，连接器立刻启动失败**。放在 `~/.dsh/` 下就与工作区彻底无关了。
+
+**② 令牌不该躺在 git 工作区里。**
+虽然 `.gitignore` 有 `.github-token` 规则兜底，但一个活着的令牌待在
+仓库目录里，总有被 `git add -f`、被备份工具、被压缩打包带走的可能。
+放在仓库外面，这些风险一次性消失。
+
+> 历史上这个文件确实放在 `D:\radio\.github-token` 过。现已迁移，
+> `D:\radio` 里**不应该**再有这个文件。
 
 ### 为什么不放进聊天窗口
 
@@ -116,7 +132,7 @@ github_pat_xxxxxxxxxxxxxxxxxxxx
 放好文件之后，让助手跑一次验证。手工验证的话是这一条：
 
 ```powershell
-$tok = (Get-Content D:\radio\.github-token -Raw).Trim()
+$tok = (Get-Content C:\Users\AlanL\.dsh\.github-token -Raw).Trim()
 Invoke-RestMethod -Uri 'https://api.github.com/user' -Headers @{
   Authorization = "Bearer $tok"
   Accept        = 'application/vnd.github+json'
@@ -134,6 +150,11 @@ node D:\radio\tools\check-token-write.mjs
 
 它会真的尝试建一个临时分支再删掉。`PASS` 才算能推代码；
 `FAIL ... READ-ONLY` 说明 Contents 还是 Read，去令牌设置里改成 **Read and write**。
+
+**换了令牌之后必须重启 dsh**，否则 GitHub 连接器会继续拿旧令牌，
+每个调用都报 `unauthorized: AuthenticateToken authentication failed`
+（`!!js` 表达式只在连接器首次加载时求值一次）。详见
+[`github-connector.md`](github-connector.md) 第 5 节。
 
 > ⚠️ **不要用 API 的 `permissions.push` 字段判断权限 —— 它会骗人。**
 > 实测过：一个**只读**令牌查 `GET /repos/{owner}/{repo}` 返回

@@ -58,15 +58,30 @@
 
 ## 3. 令牌为什么不写在配置里
 
-配置里写的是 `!!js` 表达式，在**加载时**从 `D:\radio\.github-token` 读：
+配置里写的是 `!!js` 表达式，在**加载时**从 `C:\Users\AlanL\.dsh\.github-token` 读：
 
 ```
-!!js '(/^(github_pat_|ghp_)/.test(readFileSync("D:/radio/.github-token","utf8").trim())
+!!js '(/^(github_pat_|ghp_)/.test(readFileSync("C:/Users/AlanL/.dsh/.github-token","utf8").trim())
       ? readFileSync(...).trim()
       : (() => { throw ... })()).replace(/^/, "Bearer ")'
 ```
 
 这样 `cordis.patch.yml` 保持干净 —— **可以放心备份或分享，不会带走令牌**。
+
+### 为什么令牌不放在工作区里
+
+**连接器挂载在整个 `web` profile 上，不是绑在某个工作区。**
+所以你在 `D:\radio`、`D:\game`、`D:\today` 或任何其他目录里，
+那 46 个工具都在 —— 连接器根本不知道「工作区」这个概念，它只跟
+GitHub 账号和令牌说话（会话本身是按工作区分目录的，见
+`~/.dsh/sessions/--D-radio--`、`--D-game--`、`--D-today--`，但那是会话存储，
+与连接器无关）。
+
+令牌**曾经**放在 `D:\radio\.github-token`，那就等于把连接器绑死在那个目录上：
+目录一改名或移动，连接器就启动失败。现在放在 `~/.dsh/` 下，与工作区彻底解耦。
+
+> ⚠️ **不要把令牌放回仓库里。** 一旦放回去，这个连接器就只能在那一个工作区用，
+> 而且令牌会躺在 git 工作区里（虽然被 `.gitignore` 挡住，但多一层风险）。
 
 **为什么不用 `process.env.GITHUB_PAT`**（原本的首选方案）：`setx GITHUB_PAT <token>`
 在本沙箱直接失败 —— `ERROR: Access to the registry path is denied.`
@@ -76,9 +91,6 @@
 **为什么用 `throw` 而不是给默认值**：空的 `"Bearer "` 仍然是合法字符串，
 能过 `z.dict(String)` 校验，然后表现为一个语焉不详的 401。
 直接抛错能让问题在启动时就以明确信息暴露。
-
-> ⚠️ **配置文件里写死了 `D:/radio/.github-token` 这个绝对路径。**
-> 如果仓库换目录，必须同步改这里。
 
 ---
 
@@ -114,6 +126,27 @@ node D:\radio\_mcp_probe.mjs     # 直连端点跑完整握手，列出全部工
 之前那个 `unauthorized: AuthenticateToken authentication failed` 消失了 ——
 这实测确认了第 5 节「必须重启」的说法。
 
+### 作用域：连接器服务所有工作区（2026-10-03 解耦）
+
+连接器原本把令牌路径写死成 `D:/radio/.github-token`，等于绑死了那一个工作区。
+现已把令牌移到 `C:\Users\AlanL\.dsh\.github-token` 并更新表达式，
+**连接器与工作区彻底解耦**：
+
+| 情况 | 迁移前 | 迁移后 |
+|---|---|---|
+| 切到 `D:\game` 等其他工作区 | ✅ 能用（但仍读 `D:\radio` 的文件） | ✅ 能用 |
+| `D:\radio` 改名 / 移动 / 删除 | ❌ 连接器启动失败（`ENOENT`） | ✅ 不受影响 |
+| 令牌文件位置 | 在 git 工作区内 | 在 `~/.dsh/`，不在任何仓库里 |
+
+验证：改完 `cordis.patch.yml` 后 `mcp__github__get_me` 立即返回正常
+（`patchReload: live` 热加载生效，**这次不需要重启**）——
+因为路径变了但令牌值没变，连接器重建后读到的是同一个字符串。
+
+> **profile 作用域提醒**：这个连接器挂在 `web` profile 上，
+> 所以 **DSH Web GUI 有，DSH Desktop 没有** ——
+> `C:\Users\AlanL\.dsh\profiles\desktop\cordis.patch.yml` 里没有任何
+> `mcp`/`github` 配置。要在 Desktop 里也用，得把同一段配置复制过去。
+
 ### 两个已知的工具限制（不是故障，别浪费时间去修）
 
 **① `run_secret_scanning` 对本仓库永远不可用**
@@ -142,27 +175,32 @@ search_code("repo:sblzc/workspace \"signal pipe\"") → 0 条，incomplete_resul
 |---|---|
 | 会话里完全没有 `mcp__github__*` | `cordis.patch.yml` 是否被热加载；`failOnStartupError: true` 应让启动失败变响亮 |
 | **换了令牌后报 `unauthorized: AuthenticateToken authentication failed`** | **连接器仍持有旧令牌** —— 见第 5 节，重启 dsh 最可靠。（不要用 `permissions.push` 判断权限，那个字段会骗人；用 `tools/check-token-write.mjs`） |
-| 有工具但调用报 401 | `.github-token` 内容是否含多余空白/换行；令牌是否被吊销或过期 |
+| 有工具但调用报 401 | `~/.dsh/.github-token` 内容是否含多余空白/换行；令牌是否被吊销或过期 |
 | 配置解析失败 | `!!js` 后面**必须**跟合法 YAML 标量 —— 裸反引号会报 `bad indentation of a mapping entry` |
 | `authorization value undefined` | 表达式返回了 `undefined`，检查 `readFileSync` 路径 |
+| Desktop 里没有 `mcp__github__*` | 连接器只装在 `web` profile；desktop 的 patch 文件里没有这段配置 |
 
 ---
 
 ## 5. 维护
 
-**轮换令牌**（**只改 `.github-token` 是不够的**，见下）：
+**轮换令牌**（**只改令牌文件是不够的**，见下）：
 
 ```powershell
 # 1) 写新的令牌（一行，不要引号，不要 'Bearer ' 前缀）
-Set-Content -Path D:\radio\.github-token -Value '<NEW_TOKEN>' -NoNewline -Encoding ascii
+Set-Content -Path C:\Users\AlanL\.dsh\.github-token -Value '<NEW_TOKEN>' -NoNewline -Encoding ascii
 
-# 2) git 侧：重跑脚本，把新令牌写进 .git/radio-credentials
+# 2) git 侧（仅当你要从 D:\radio 推送时才需要）
 powershell -NoProfile -ExecutionPolicy Bypass -File D:\radio\tools\setup-git-auth.ps1
 
-# 3) 连接器侧：让 !!js 重新求值 —— 见下方说明
+# 3) 连接器侧：重启 dsh 让 !!js 重新求值
 ```
 
-**第 3 步为什么不能只 touch 文件**：`cordis-plugin-include/lib/index.js:177`
+**注意第 3 步必须重启**：`!!js` 表达式只在 entry 首次加载时求值一次，
+运行中的连接器会继续拿旧令牌，每个调用都报
+`unauthorized: AuthenticateToken authentication failed`。
+
+**为什么不能只 touch 文件**：`cordis-plugin-include/lib/index.js:177`
 的 `read()` 第一行就是
 
 ```js
@@ -172,24 +210,31 @@ if (!forced && this.content === content) return;
 **内容不变就直接返回**，所以改时间戳（`(Get-Item $f).LastWriteTime = ...`）
 不会触发任何重载。必须**改变文件内容** —— 加一行注释即可。
 
-⚠️ **实测：即使改了内容触发热加载，连接器仍可能继续用旧令牌。**
-`interpolate` 本身不缓存（`cordis-plugin-loader/lib/index.js:295-300`），
-但重载走的 `update` 路径不一定重跑 `internal/config` 求值
-（`cordis-plugin-loader/lib/index.js:685-690`，其中一行 guard 是
-`if (this.parent.fiber?.entry === this.entry) return config;`）。
-**最可靠的做法是重启 dsh。** 确认方法：调用 `mcp__github__get_me`，
-成功返回 `{"login":"sblzc"}` 就说明新令牌生效了。
+⚠️ **但实测：改了内容触发热加载，不一定足够。**
+2026-10-03 改令牌路径时热加载生效了（因为令牌**值**没变，连接器重建后
+读到的还是同一个字符串）；而更早换令牌**值**时，热加载后连接器仍用旧令牌。
+差别在于 `cordis-plugin-loader/lib/index.js:685-690` 的 guard
+（`if (this.parent.fiber?.entry === this.entry) return config;`）——
+`interpolate` 本身不缓存（同文件 `:295-300`），但重载路径不一定重跑它。
+
+**结论：换了令牌值就重启 dsh；只改路径可以靠热加载。**
+确认方法：调用 `mcp__github__get_me`，成功返回 `{"login":"sblzc"}` 即生效。
 
 **临时停用**：在 `mcp-github` 那一行加 `disabled: true`，或注释掉整个 `- insert:` 块。
 
-**改了工作区路径**：同步改 `cordis.patch.yml` 里表达式的绝对路径。
+**改了令牌文件位置**：同步改 `cordis.patch.yml` 里表达式的路径。
+（正常情况下不需要动 —— 它现在指向 `~/.dsh/`，与工作区无关。）
 
 ---
 
 ## 6. 令牌安全
 
-- `.github-token` **已被 `.gitignore` 忽略**，不会进版本库。
+- 令牌存在 `C:\Users\AlanL\.dsh\.github-token` —— **不在任何 git 仓库里**，
+  所以既不会被提交，也不会被 `git status` 或误 `add` 看到。
 - `cordis.patch.yml` 里**没有明文令牌**（可自行 grep `github_pat_` 复核）。
+- **`D:\radio` 里不应再有令牌文件。** 如果发现 `D:\radio\.github-token`
+  又出现了，说明有人按旧文档操作了 —— 那会把连接器重新绑死在这个目录上。
+  （`.gitignore:2` 有 `.github-token` 规则作为兜底。）
 - `.git/config` 里**没有明文令牌** —— 令牌经 `.git/radio-credentials` +
   `include.path` 注入（见 `ENVIRONMENT.md` 第 11 节）。
   历史教训：`git push -u <带令牌的URL>` 会把令牌写进 `.git/config`，**永远不要这么用**。
@@ -201,9 +246,11 @@ if (!forced && this.content === content) return;
 
 | 文件 | 作用 |
 |---|---|
-| `D:\radio\.github-token` | 令牌本体（已 gitignore） |
+| `C:\Users\AlanL\.dsh\.github-token` | **令牌本体** —— 在 `~/.dsh/` 下，不在任何仓库里 |
+| `C:\Users\AlanL\.dsh\profiles\web\cordis.patch.yml` | 连接器配置（`mcp-github` 块） |
 | `_mcp_probe.mjs` | 直连端点的握手探测脚本（仓库根） |
 | `_yamlcheck.mjs` | 校验 `cordis.patch.yml`：YAML 语法 / `!!js` 求值 / schema 形状（仓库根） |
+| `tools/check-token-write.mjs` | 真写一次判定令牌是否有写权限 |
 | `D:\radio\tools\setup-git-auth.ps1` | 配置 git 自动认证（推送用，与连接器独立） |
 | `docs/github-pat.md` | PAT 创建指南（类型、权限、预填链接） |
-| `ENVIRONMENT.md` | 环境实测报告（第 8/11 节是本文的前置约束） |
+| `ENVIRONMENT.md` | 环境实测报告（第 8/11/12 节是本文的前置约束） |
