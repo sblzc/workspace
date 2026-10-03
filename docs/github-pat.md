@@ -126,13 +126,24 @@ Invoke-RestMethod -Uri 'https://api.github.com/user' -Headers @{
 返回你的账号信息（`login`、`id`、`plan` 等）就是通了。
 返回 `401 Bad credentials` 说明令牌复制不完整或已被吊销。
 
-查这个令牌自己有哪些权限：
+**但「身份能认出来」不等于「能写」。** 这两件事必须分开验证：
 
 ```powershell
-Invoke-RestMethod -Uri 'https://api.github.com/user' -Headers @{
-  Authorization = "Bearer $tok"
-} | Select-Object login
+node D:\radio\tools\check-token-write.mjs
 ```
+
+它会真的尝试建一个临时分支再删掉。`PASS` 才算能推代码；
+`FAIL ... READ-ONLY` 说明 Contents 还是 Read，去令牌设置里改成 **Read and write**。
+
+> ⚠️ **不要用 API 的 `permissions.push` 字段判断权限 —— 它会骗人。**
+> 实测过：一个**只读**令牌查 `GET /repos/{owner}/{repo}` 返回
+> ```json
+> "permissions": {"admin":true,"maintain":true,"push":true,"triage":true,"pull":true}
+> ```
+> 但同一个令牌做任何写操作都是 `403 Resource not accessible by personal access token`，
+> `git push` 报 `Permission to sblzc/workspace.git denied to sblzc`。
+> 那个字段反映的是**你账号在这个仓库里的角色**，不是**这个令牌被授予的权限**。
+> 唯一可靠的判据是**真的做一次写操作** —— 这就是 `check-token-write.mjs` 存在的理由。
 
 ---
 
