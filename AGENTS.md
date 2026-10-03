@@ -40,20 +40,27 @@ git fetch origin
 | `codeload.github.com` | 100% |
 
 → git 网络操作**失败就重试**，不要当成认证或权限问题。
-→ 判断权限的正确方式是查 `GET /api.github.com/repos/<owner>/<repo>` 的 `permissions` 字段，
-**绝不要用 push 的报错推断权限**。
+→ 判断权限的正确方式**不是**查 `permissions` 字段 —— 那个字段对只读令牌也报
+`push: true`（它描述的是账号在仓库里的角色，不是令牌的 scope）。
+**唯一可靠的判据是真的做一次写操作**：`node tools/check-token-write.mjs`。
 
 **每次 git 网络操作都会打一行 `sh.exe: couldn't create signal pipe` —— 这是噪声，
 退出码仍是 0、结果正确。以退出码和远端 SHA 为准。**
+
+本机有可用代理 `127.0.0.1:7897`（直连失败时的兜底）：
+`git -c http.proxy=http://127.0.0.1:7897 push origin main`
 
 ## 三、GitHub 连接器
 
 已挂载官方托管 MCP（`mcp__github__*`，46 个工具），零代码。
 配置与排查见 `docs/github-connector.md`。
 
-- 令牌：`D:\radio\.github-token`（已 gitignore）
+- 令牌：`C:\Users\AlanL\.dsh\.github-token` —— **在 `~/.dsh/` 下，不在本仓库里**
 - 配置：`~/.dsh/profiles/web/cordis.patch.yml` 的 `mcp-github` 块
-- **配置文件里写死了 `D:/radio/.github-token` 绝对路径**，换目录要同步改
+- **连接器挂在 `web` profile 上，服务所有工作区**（不绑定 `D:\radio`）。
+  **不要把令牌放回仓库里** —— 那会把连接器绑死在这个目录上。
+- 换令牌值之后**必须重启 dsh**；只改令牌文件路径可以靠热加载。
+  （`patchReload: live`，但 `!!js` 只在 entry 首次加载时求值一次。）
 
 ## 四、沙箱事实（本项目踩过的）
 
@@ -70,4 +77,8 @@ git fetch origin
 | `docs/` | 面向人的文档（PAT 指南、连接器手册） |
 | `tools/` | 可重跑的运维脚本 |
 | `ENVIRONMENT.md` | 环境实测报告，**所有结论都有命令输出为证** |
-| `.github-token` | 令牌本体，**已 gitignore，永不提交** |
+| `tools/check-token-write.mjs` | 真写一次判定令牌权限（`permissions` 字段不可信） |
+
+**令牌文件不在本仓库里**，在 `C:\Users\AlanL\.dsh\.github-token`。
+`.gitignore` 里保留 `.github-token` 规则只是兜底 —— 如果哪天这个文件又出现在
+`D:\radio` 下，说明有人按旧文档操作了，**要纠正**。
